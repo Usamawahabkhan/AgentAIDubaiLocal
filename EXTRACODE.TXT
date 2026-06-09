@@ -1,11 +1,110 @@
+import requests
+import json
 
-msg = response.choices[0].message
-print("Model response:", msg.content)
-if not msg.tool_calls:
-    print("No tool calls detected.")
-    print("Tool calls:", msg.tool_calls)
-    tool_call = msg.tool_calls[0]
-    args = json.loads(tool_call.function.arguments)
+def get_age_estimate(name: str):
+    response = requests.get("https://api.agify.io", params={"name": name})
+    return {"source": "agify.io", "name": name, **response.json()}
 
-    result = add_numbers(**args)
-    print(f"Tool response: {result}")
+def get_gender_estimate(name: str):
+    response = requests.get("https://api.genderize.io", params={"name": name})
+    return {"source": "genderize.io", "name": name, **response.json()}
+
+def get_nationality_estimate(name: str):
+    response = requests.get("https://api.nationalize.io", params={"name": name})
+    return {"source": "nationalize.io", "name": name, **response.json()}
+
+demo_tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_age_estimate",
+            "description": "Estimate age for a given name using a free API.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                },
+                "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_gender_estimate",
+            "description": "Estimate gender for a given name using a free API.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                },
+                "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_nationality_estimate",
+            "description": "Estimate nationality probabilities for a given name using a free API.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                },
+                "required": ["name"]
+            }
+        }
+    }
+]
+
+tool_map = {
+    "get_age_estimate": get_age_estimate,
+    "get_gender_estimate": get_gender_estimate,
+    "get_nationality_estimate": get_nationality_estimate
+}
+
+def run_name_demographic_agent(user_input: str):
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a demographic assistant. Use the available tools to fetch "
+                "age, gender, and nationality estimates for a name from free public APIs. "
+                "If the user asks about a name, call the appropriate tool."
+            )
+        },
+        {"role": "user", "content": user_input}
+    ]
+
+    while True:
+        response = client.chat.completions.create(
+            model="qwen3.7-plus",
+            messages=messages,
+            tools=demo_tools,
+            tool_choice="auto",
+            max_tokens=200
+        )
+
+        msg = response.choices[0].message
+
+        if not msg.tool_calls:
+            return msg.content
+
+        tool_call = msg.tool_calls[0]
+        args = json.loads(tool_call.function.arguments)
+        result = tool_map[tool_call.function.name](**args)
+
+        messages.append(msg)
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "name": tool_call.function.name,
+            "content": json.dumps(result)
+        })
+
+# Demo run
+output = run_name_demographic_agent(
+    "Please infer age, gender, and nationality for the name Ava using the available tools."
+)
+print(output)
