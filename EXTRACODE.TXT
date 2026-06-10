@@ -1,110 +1,209 @@
-import requests
-import json
+# ============================================================
+# 1. IMPORTS
+# ============================================================
+from typing import TypedDict, List, Any
+from langgraph.graph import StateGraph
 
-def get_age_estimate(name: str):
-    response = requests.get("https://api.agify.io", params={"name": name})
-    return {"source": "agify.io", "name": name, **response.json()}
+# You already defined these earlier:
+# - llm_openrouter (OpenAILike)
+# - USE_OPENROUTER
+# - query_engine (RetrieverQueryEngine)
+# So we simply reuse them here.
 
-def get_gender_estimate(name: str):
-    response = requests.get("https://api.genderize.io", params={"name": name})
-    return {"source": "genderize.io", "name": name, **response.json()}
+# Select LLM (OpenRouter only for this version)
+llm = llm_openrouter
 
-def get_nationality_estimate(name: str):
-    response = requests.get("https://api.nationalize.io", params={"name": name})
-    return {"source": "nationalize.io", "name": name, **response.json()}
 
-demo_tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_age_estimate",
-            "description": "Estimate age for a given name using a free API.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"}
-                },
-                "required": ["name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_gender_estimate",
-            "description": "Estimate gender for a given name using a free API.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"}
-                },
-                "required": ["name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_nationality_estimate",
-            "description": "Estimate nationality probabilities for a given name using a free API.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"}
-                },
-                "required": ["name"]
-            }
-        }
+# ============================================================
+# 2. SHARED STATE
+# ============================================================
+class AgentState(TypedDict):
+    user_query: str
+    supervisor_decision: str
+    rag_answer: str
+    calc_answer: str
+    code_answer: str
+    memory: List[str]
+    plan: str
+    final: str
+
+
+# ============================================================
+# 3. MEMORY NODE
+# ============================================================
+def memory_node(state: AgentState) -> AgentState:
+    updated_memory = state["memory"] + [state["user_query"]]
+    return {**state, "memory": updated_memory}
+
+
+# ============================================================
+# 4. PLANNING AGENT
+# ============================================================
+def planning_agent(state: AgentState) -> AgentState:
+    prompt = f"""
+    You are the Planning Agent.
+
+    Your job:
+    - Look at the user query and conversation memory.
+    - Decide which capabilities are needed: RAG, CALC, CODE.
+    - Produce a short step-by-step plan.
+
+    Memory:
+    {state['memory']}
+
+    User query:
+    {state['user_query']}
+
+    Respond with a concise plan.
+    """
+
+    resp = llm.complete(prompt)
+    plan = getattr(resp, "text", str(resp)).strip()
+
+    return {**state, "plan": plan}
+
+
+# ============================================================
+# 5. SUPERVISOR AGENT
+# ============================================================
+def supervisor_agent(state: AgentState) -> AgentState:
+    prompt = f"""
+    You are the Supervisor Agent.
+
+    You have a plan from the Planning Agent:
+    {state['plan']}
+
+    Decide which SINGLE agent should answer the user query NOW:
+    - RAG
+    - CALC
+    - CODE
+
+    User query: {state['user_query']}
+
+    Respond with ONLY one word: RAG, CALC, or CODE.
+    """
+
+    resp = llm.complete(prompt)
+    decision = getattr(resp, "text", str(resp)).strip().upper()
+
+    return {**state, "supervisor_decision": decision}
+
+
+# ============================================================
+# 6. RAG AGENT (USING YOUR query_engine)
+# ============================================================
+def rag_agent(state: AgentState) -> AgentState:
+    query = state["user_query"]
+
+    # LlamaIndex RAG pipeline
+    resp = query_engine.query(query)
+    answer = str(resp)
+
+    return {**state, "rag_answer": answer}
+
+
+# ============================================================
+# 7. CALCULATOR AGENT
+# ============================================================
+def calc_agent(state: AgentState) -> AgentState:
+    try:
+        result = eval(state["user_query"])
+    except Exception as e:
+        result = f"Invalid expression: {e}"
+
+    return {**state, "calc_answer": str(result)}
+
+
+# ============================================================
+# 8. CODE AGENT
+# ============================================================
+def code_agent(state: AgentState) -> AgentState:
+    code = state["user_query"]
+    local_vars: dict[str, Any] = {}
+
+    try:
+        exec(code, {}, local_vars)
+        result = str(local_vars)
+    except Exception as e:
+        result = str(e)
+
+    return {**state, "code_answer": result}
+
+
+# ============================================================
+# 9. PARALLEL AGENTS NODE
+# ============================================================
+def parallel_agents(state: AgentState) -> AgentState:
+    rag = rag_agent(state)
+    calc = calc_agent(state)
+    code = code_agent(state)
+
+    return {
+        **state,
+        "rag_answer": rag["rag_answer"],
+        "calc_answer": calc["calc_answer"],
+        "code_answer": code["code_answer"],
     }
-]
 
-tool_map = {
-    "get_age_estimate": get_age_estimate,
-    "get_gender_estimate": get_gender_estimate,
-    "get_nationality_estimate": get_nationality_estimate
-}
 
-def run_name_demographic_agent(user_input: str):
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a demographic assistant. Use the available tools to fetch "
-                "age, gender, and nationality estimates for a name from free public APIs. "
-                "If the user asks about a name, call the appropriate tool."
-            )
-        },
-        {"role": "user", "content": user_input}
-    ]
+# ============================================================
+# 10. FINAL ANSWER NODE (FIXED)
+# ============================================================
+def final_answer(state: AgentState) -> AgentState:
+    decision = state["supervisor_decision"]
 
-    while True:
-        response = client.chat.completions.create(
-            model="qwen3.7-plus",
-            messages=messages,
-            tools=demo_tools,
-            tool_choice="auto",
-            max_tokens=200
-        )
+    if decision == "RAG":
+        answer = state["rag_answer"]
+    elif decision == "CALC":
+        answer = state["calc_answer"]
+    elif decision == "CODE":
+        answer = state["code_answer"]
+    else:
+        answer = "Supervisor could not decide."
 
-        msg = response.choices[0].message
+    return {**state, "final": answer}
 
-        if not msg.tool_calls:
-            return msg.content
 
-        tool_call = msg.tool_calls[0]
-        args = json.loads(tool_call.function.arguments)
-        result = tool_map[tool_call.function.name](**args)
+# ============================================================
+# 11. BUILD LANGGRAPH WORKFLOW
+# ============================================================
+workflow = StateGraph(AgentState)
 
-        messages.append(msg)
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "name": tool_call.function.name,
-            "content": json.dumps(result)
-        })
+workflow.add_node("memory", memory_node)
+workflow.add_node("planner", planning_agent)
+workflow.add_node("supervisor", supervisor_agent)
+workflow.add_node("parallel", parallel_agents)
+workflow.add_node("final", final_answer)
 
-# Demo run
-output = run_name_demographic_agent(
-    "Please infer age, gender, and nationality for the name Ava using the available tools."
-)
-print(output)
+workflow.set_entry_point("memory")
+
+workflow.add_edge("memory", "planner")
+workflow.add_edge("planner", "supervisor")
+workflow.add_edge("supervisor", "parallel")
+workflow.add_edge("parallel", "final")
+
+app = workflow.compile()
+
+
+# ============================================================
+# 12. RUN THE SYSTEM
+# ============================================================
+result = app.invoke({
+    "user_query": "Explain how RAG works and then compute 12 * 9.",
+    "supervisor_decision": "",
+    "rag_answer": "",
+    "calc_answer": "",
+    "code_answer": "",
+    "memory": [],
+    "plan": "",
+    "final": ""
+})
+
+print("\n================ PLAN ================\n")
+print(result["plan"])
+
+print("\n================ FINAL ANSWER ================\n")
+print(result["final"])
+
+print("\n================ MEMORY ================\n")
+print(result["memory"])
