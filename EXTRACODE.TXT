@@ -207,3 +207,7 @@ print(result["final"])
 
 print("\n================ MEMORY ================\n")
 print(result["memory"])
+
+
+
+https://langfuse.com/guides/cookbook/integration_langgraph#add-custom-spans-to-a-langgraph-trace
